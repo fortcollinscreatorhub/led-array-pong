@@ -35,20 +35,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
+#include <OctoWS2811.h>
+#include <SparkFun_MMA8452Q.h>
 
 #define SCR_W 60
 #define SCR_H 30
+#define SCR_H_MEM 32
+#define LED_NUM(x, y) (((y) * SCR_W) + (x))
+
 #define SCORE_MAX 5
 
-#define R(col) (((col) >> 16) & 0xff)
-#define G(col) (((col) >>  8) & 0xff)
-#define B(col) (((col) >>  0) & 0xff)
 #define RGB(r, g, b) (((r) << 16) | ((g) << 8) | (b))
 #define COL_BORDER RGB(255, 255, 255)
 #define COL_BALL RGB(255, 0, 255)
 #define COL_LBAT RGB(255, 0, 0)
 #define COL_RBAT RGB(0, 255, 0)
+
+// FIXME: Needs calibration
+#define ACCEL_DEADSPOT 10
 
 enum state {
     STATE_WAIT_TURN_START,
@@ -73,11 +77,15 @@ struct ball {
 
 enum state state;
 int frame;
-uint32_t screen[SCR_H][SCR_W];
 struct bat lbat;
 struct bat rbat;
 struct ball ball;
 bool last_score_l;
+const uint32_t leds_per_strip = SCR_W * ((SCR_H_MEM + 8 - 1) / 8);
+DMAMEM int leds_mem[leds_per_strip * 6];
+OctoWS2811 leds(leds_per_strip, leds_mem, NULL, WS2811_GRB | WS2811_800kHz);
+MMA8452Q accel_l(0x1d);
+MMA8452Q accel_r(0x1c);
 
 void enter_state_wait_turn_start(void);
 void enter_state_playing(void);
@@ -221,14 +229,19 @@ void render(void) {
     uint32_t c;
     bool blink_off = !((frame / 5) & 1);
 
+    // Background
+    // HACK: We should call leds.clear() but it doesn't exist
+    memset(leds_mem, 0, sizeof(leds_mem));
+
     // Border
-    memset(screen, 0, sizeof(screen));
-    memset(&(screen[1][0]), COL_BORDER, (SCR_W - 1) * 4);
-    memset(&(screen[SCR_H - 1][0]), COL_BORDER, (SCR_W - 1) * 4);
+    for (int x = 0; x < SCR_W; x++) {
+        leds.setPixel(LED_NUM(x, 1), COL_BORDER);
+        leds.setPixel(LED_NUM(x, SCR_H - 1), COL_BORDER);
+    }
     for (int y = 1; y < SCR_H; y++) {
-        screen[y][0] = COL_BORDER;
-        screen[y][(SCR_W / 2) - 1] = COL_BORDER;
-        screen[y][SCR_W - 2] = COL_BORDER;
+        leds.setPixel(LED_NUM(0, y), COL_BORDER);
+        leds.setPixel(LED_NUM((SCR_W / 2) - 1, y), COL_BORDER);
+        leds.setPixel(LED_NUM(SCR_W - 2, y), COL_BORDER);
     }
 
     // Left bat
@@ -242,7 +255,7 @@ void render(void) {
         break;
     }
     for (int y = lbat.yp; y < lbat.yp + lbat.len; y++)
-        screen[y][1] = c;
+        leds.setPixel(LED_NUM(1, y), c);
 
     // Left score
     c = COL_LBAT;
@@ -259,7 +272,7 @@ void render(void) {
         break;
     }
     for (int x = 0; x < lbat.score; x++)
-        screen[0][x + 1] = c;
+        leds.setPixel(LED_NUM(x + 1, 0), c);
 
     // Right bat
     c = COL_RBAT;
@@ -272,7 +285,7 @@ void render(void) {
         break;
     }
     for (int y = rbat.yp; y < rbat.yp + rbat.len; y++)
-        screen[y][SCR_W - 3] = c;
+        leds.setPixel(LED_NUM(SCR_W - 3, y), c);
 
     // Right score
     c = COL_RBAT;
@@ -289,7 +302,7 @@ void render(void) {
         break;
     }
     for (int x = 0; x < rbat.score; x++)
-        screen[0][SCR_W - (3 + x)] = c;
+        leds.setPixel(LED_NUM(SCR_W - (3 + x), 0), c);
 
     // Ball
     c = COL_BALL;
@@ -302,57 +315,46 @@ void render(void) {
     default:
         break;
     }
-    screen[ball.yp][ball.xp] = c;
+    leds.setPixel(LED_NUM(ball.xp, ball.yp), c);
 }
 
-void stdout_display_screen(void) {
-    uint32_t last_col = 0x1000000;
-
-    printf("\033c");
-    for (int y = 0; y < SCR_H; y++) {
-        for (int x = 0; x < SCR_W; x++) {
-            uint32_t col = screen[y][x];
-            if (col != last_col)
-                printf("\033[38;2;%d;%d;%dm", R(col), G(col), B(col));
-            putchar('*');
-        }
-        putchar('\n');
-    }
-    printf("\033[38;2;0;255;0m");
-    fflush(stdout);
+void keys_accel_init(void) {
+    accel_l.read();
+    if (accel_l.x < -ACCEL_DEADSPOT)
+        lbat.ypd = -1;
+    else if (accel_l.x > ACCEL_DEADSPOT)
+        lbat.ypd = 1;
+    accel_r.read();
+    if (accel_r.x < -ACCEL_DEADSPOT)
+        rbat.ypd = -1;
+    else if (accel_r.x > ACCEL_DEADSPOT)
+        rbat.ypd = 1;
 }
 
-void keys_random_read(void) {
-    lbat.ypd = (rand() % 3) - 1;
-    rbat.ypd = (rand() % 3) - 1;
-}
-
-void keys_i2c_init(void) {
-    // FIXME: Open I2C bus device
-}
-
-void keys_i2c_read(void) {
-    // FIXME: Read I2C devices
+void keys_accel_read(void) {
+    accel_l.read();
+    accel_r.read();
 }
 
 void leds_init(void) {
-    // FIXME: Connect to /dev/tty*
+    leds.begin();
+    leds.show();
 }
 
 void leds_display_screen(void) {
-    // FIXME: Write to serial fds.
+    leds.show();
 }
 
-int main(int argc, char **argv) {
+void setup(void) {
     leds_init();
+    keys_accel_init();
     init_game();
-    for (;;) {
-        keys_random_read();
-        iter();
-        render();
-        stdout_display_screen();
-        leds_display_screen();
-        usleep(50 * 1000);
-    }
-    return 0;
+}
+
+void loop(void) {
+    keys_accel_read();
+    iter();
+    render();
+    leds_display_screen();
+    delay(50);
 }
