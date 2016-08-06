@@ -40,8 +40,12 @@
 
 #define SCR_W 60
 #define SCR_H 30
-#define SCR_H_MEM 32
-#define LED_NUM(x, y) (((y) * SCR_W) + (x))
+#define LED_SIGNALS 8
+#define SCR_H_MEM ((SCR_H + LED_SIGNALS - 1) & ~(LED_SIGNALS - 1))
+#define LED_NUM(x, y) \
+    (((y) & 1) ? \
+        ((((y) + 1) * SCR_W) - ((x) + 1)) : \
+        (((y) * SCR_W) + (x)))
 
 #define SCORE_MAX 5
 
@@ -51,8 +55,7 @@
 #define COL_LBAT RGB(255, 0, 0)
 #define COL_RBAT RGB(0, 255, 0)
 
-// FIXME: Needs calibration
-#define ACCEL_DEADSPOT 10
+#define ACCEL_DEADSPOT 100
 
 enum state {
     STATE_WAIT_TURN_START,
@@ -81,9 +84,10 @@ struct bat lbat;
 struct bat rbat;
 struct ball ball;
 bool last_score_l;
-const uint32_t leds_per_strip = SCR_W * ((SCR_H_MEM + 8 - 1) / 8);
-DMAMEM int leds_mem[leds_per_strip * 6];
-OctoWS2811 leds(leds_per_strip, leds_mem, NULL, WS2811_GRB | WS2811_800kHz);
+const uint32_t leds_per_strip = SCR_W * SCR_H_MEM / LED_SIGNALS;
+int leds_mem[leds_per_strip * 6];
+DMAMEM int leds_mem_dma[leds_per_strip * 6];
+OctoWS2811 leds(leds_per_strip, leds_mem_dma, leds_mem, WS2811_GRB | WS2811_800kHz);
 MMA8452Q accel_l(0x1d);
 MMA8452Q accel_r(0x1c);
 
@@ -319,21 +323,21 @@ void render(void) {
 }
 
 void keys_accel_init(void) {
-    accel_l.read();
-    if (accel_l.x < -ACCEL_DEADSPOT)
-        lbat.ypd = -1;
-    else if (accel_l.x > ACCEL_DEADSPOT)
-        lbat.ypd = 1;
-    accel_r.read();
-    if (accel_r.x < -ACCEL_DEADSPOT)
-        rbat.ypd = -1;
-    else if (accel_r.x > ACCEL_DEADSPOT)
-        rbat.ypd = 1;
+    accel_l.init();
+    accel_r.init();
 }
 
 void keys_accel_read(void) {
     accel_l.read();
+    if (accel_l.y < -ACCEL_DEADSPOT)
+        lbat.ypd = -1;
+    else if (accel_l.y > ACCEL_DEADSPOT)
+        lbat.ypd = 1;
     accel_r.read();
+    if (accel_r.y < -ACCEL_DEADSPOT)
+        rbat.ypd = 1;
+    else if (accel_r.y > ACCEL_DEADSPOT)
+        rbat.ypd = -1;
 }
 
 void leds_init(void) {
